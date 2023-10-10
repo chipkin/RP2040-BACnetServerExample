@@ -1,7 +1,7 @@
 # RP2040-BACnetServerExample
 Server example using the Raspberry PI RP2040 wifi chip
 
-In this project we are using the [CAS BACnet stack](https://www.bacnetstack.com/) to generate a simple BACnet server with an Analog Input, Multi-state-value (MSV), and Netowrk Port object. The analog input displays the CPU temperature and can be configured with Celsius or Fahrenheit units. The MSV shows the current mode of the built-in LED.
+In this project we are using the [CAS BACnet stack](https://www.bacnetstack.com/) to generate a simple BACnet server with an Analog Input, Multi-state-value (MSV), and Network Port object. The analog input displays the CPU temperature and can be configured with Celsius or Fahrenheit units. The MSV shows the current mode of the built-in LED.
 
 A BACnet client (such as the [CAS BACnet Explorer](https://store.chipkin.com/products/tools/cas-bacnet-explorer)) can be used to write to this MSV to change the mode.
 
