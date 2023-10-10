@@ -14,7 +14,7 @@
  * - 4 = Blink
  * 
  * Created by: Justin Chang
- * Created on: October 3rd, 2023
+ * Created on: October 10th, 2023
  */
 
 #include <stdio.h>
@@ -24,6 +24,7 @@
 
 #include "lwip/pbuf.h"
 #include "lwip/udp.h"
+#include "lwip/dns.h"
 
 #include <CASBACnetStackAdapter.h>
 #include <CIBuildSettings.h>
@@ -33,14 +34,20 @@
 // -----------------------------
 const char* APPLICATION_VERSION = "0.0.1";  // See CHANGELOG.md for a full list of changes.
 
+// Server settings
+#define APPLICATION_BACNET_UDP_PORT 47808
+#define IPV4_ADDR_LENGTH 4
+#define INTERNAL_TEMPERATURE_SENSOR_PIN 4
+#define DNS_SERVER_MAXSIZE 5
+
 // Application Settings
 // =======================================
 // Wifi credentials
-const char WIFI_SSID[] = "";
-const char WIFI_PASSWORD[] = "";
+const char WIFI_SSID[] = "2401 Tangent";
+const char WIFI_PASSWORD[] = "Installation05";
 
 // Device Settings
-const uint32_t APPLICATION_BACNET_DEVICE_INSTANCE = 389001;
+const uint32_t APPLICATION_BACNET_DEVICE_INSTANCE = 389007;
 const char* APPLICATION_BACNET_DEVICE_OBJECT_NAME = "RP2040 BACnet Server Example";
 const char* APPLICATION_BACNET_DEVICE_DESCRIPTION = "Running CAS BACnet Stack. Project can be found at http://github.com/chipkin/RP2040-BACnetServerExample";
 
@@ -57,8 +64,22 @@ const char* APPLICATION_BACNET_OBJECT_MSV_LED_OBJECT_NAME = "LED State";
 const char* APPLICATION_BACNET_OBJECT_MSV_LED_STATE_TEXT[] = { "Off", "On", "Blink", "Fast Blink"};
 
 // Network port
-const uint32_t APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE = 4;
-const char* APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE_OBJECT_NAME = "Network port";
+const uint32_t APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE = 0;
+const char* APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE_OBJECT_NAME = "WiFi";
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[IPV4_ADDR_LENGTH];
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[IPV4_ADDR_LENGTH];
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[IPV4_ADDR_LENGTH];
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_GATEWAY[IPV4_ADDR_LENGTH];
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER[DNS_SERVER_MAXSIZE][IPV4_ADDR_LENGTH];
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER_SIZE = 0;
+bool APPLICATION_BACNET_OBJECT_NETWORKPORT_CHANGESPENDING = 0;
+
+// BBMD
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDHOSTTYPE = 0;
+uint8_t APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDHOSTIP[IPV4_ADDR_LENGTH];
+uint16_t APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDPORT;
+uint16_t APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDSUBSCRIPTIONLIFETIME;
+
 
 // LED
 // -----------------------------
@@ -77,15 +98,11 @@ const uint16_t LED_MODE_STATE_COUNT = LED_MODE_FAST_BLINK;
 struct repeating_timer blink_timer;
 bool  LEDState = 0; // blinking (on/off)
 
-// Server settings
-#define APPLICATION_BACNET_UDP_PORT 47808
-#define IPV4_ADDR_LENGTH 4
-
 // UDP packet
 // -----------------------------
 // UDP packet setup
-#define MAX_PAYLOAD_SIZE 500
-#define PACKET_QUEUE_SIZE 20
+#define MAX_PAYLOAD_SIZE 1497 // max NPDU length (bytes)
+#define PACKET_QUEUE_MAXSIZE 20
 struct udp_packet {
     uint8_t src_addr[4] = {0, 0, 0, 0};
     uint16_t port = 0;
@@ -95,12 +112,15 @@ struct udp_packet {
 
 // Global variables
 struct udp_pcb  * upcb; // udp socket
-struct udp_packet packet_queue[PACKET_QUEUE_SIZE];
-int8_t packet_queue_front = -1;
-int8_t packet_queue_rear = -1;
+struct udp_packet packet_queue[PACKET_QUEUE_MAXSIZE];
+int8_t packet_queue_front = 0;
+int8_t packet_queue_rear = PACKET_QUEUE_MAXSIZE - 1;
+int8_t packet_queue_size = 0;
 
 // Callback functions
 // -----------------------------
+// System
+time_t CallbackGetSystemTime();
 // Messages
 uint16_t CallbackReceiveMessage(uint8_t* message, const uint16_t maxMessageLength, uint8_t* receivedConnectionString, const uint8_t maxConnectionStringLength, uint8_t* receivedConnectionStringLength, uint8_t* networkType);
 uint16_t CallbackSendMessage(const uint8_t* message, const uint16_t messageLength, const uint8_t* connectionString, const uint8_t connectionStringLength, const uint8_t networkType, bool broadcast);
@@ -110,9 +130,12 @@ bool CallbackGetPropertyCharString(const uint32_t deviceInstance, const uint16_t
 bool CallbackGetPropertyUInt(uint32_t deviceInstance, uint16_t objectType, uint32_t objectInstance, uint32_t propertyIdentifier, uint32_t* value, bool useArrayIndex, uint32_t propertyArrayIndex);
 bool CallbackGetPropertyReal(uint32_t deviceInstance, uint16_t objectType, uint32_t objectInstance, uint32_t propertyIdentifier, float* value, bool useArrayIndex, uint32_t propertyArrayIndex);
 bool CallbackGetPropertyEnum(uint32_t deviceInstance, uint16_t objectType, uint32_t objectInstance, uint32_t propertyIdentifier, uint32_t* value, bool useArrayIndex, uint32_t propertyArrayIndex);
+bool CallbackGetPropertyOctetString(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, uint8_t* value, uint32_t* valueElementCount, const uint32_t maxElementCount, const bool useArrayIndex, const uint32_t propertyArrayIndex);
+bool CallbackGetPropertyBool(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, bool* value, const bool useArrayIndex, const uint32_t propertyArrayIndex);
 // Set property
 bool CallbackSetPropertyUInt(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, const uint32_t value, const bool useArrayIndex, const uint32_t propertyArrayIndex, const uint8_t priority, uint32_t* errorCode);
 bool CallbackSetPropertyEnum(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, const uint32_t value, const bool useArrayIndex, const uint32_t propertyArrayIndex, const uint8_t priority, uint32_t* errorCode);
+bool CallbackSetPropertyOctetString(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, const uint8_t* value, const uint32_t length, const bool useArrayIndex, const uint32_t propertyArrayIndex, const uint8_t priority, uint32_t* errorCode);
 // Remote device management
 bool CallbackReinitializeDevice(const uint32_t deviceInstance, const uint32_t reinitializedState, const char* password, const uint32_t passwordLength, uint32_t* errorCode);
 
@@ -125,16 +148,31 @@ bool blink_led(struct repeating_timer *t);
 void update_led_status();
 
 // UDP
+// Send a UDP packet
 void send_udp(char * IP , int port, const void * data, int data_size);
+
+// UDP packet receive callback
 void receive_udp_callback(void * arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t*addr,u16_t port);
+
+// Dequeues a UDP packet from packet queue 
+// Returns true if packet is available
 bool get_udp_packet(struct udp_packet* packet);
+
+// Enqueues a UDP packet into packet queue
 bool enqueue_udp_packet(struct udp_packet* packet);
 
+// Sets up network port object and properties
+bool setup_network_port();
 
 int main() {
     // 1. Hardware setup
 	// ==================================================================================
     stdio_init_all();
+
+    // Print application information
+    printf("FYI: RP2040 BACnet Server Example: v%s\n", APPLICATION_VERSION);
+    // TODO: update when github repo
+    printf("https://github.com/chipkin/RP2040-BACnetServerExample\n");
 
     if (cyw43_arch_init()) {
         printf("Failed to initialize cyw43\n");
@@ -142,24 +180,24 @@ int main() {
     }
     cyw43_arch_enable_sta_mode();
 	cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
-
-    // Print application information
-    printf("FYI: RP2040 BACnet Server Example: v%s\n", APPLICATION_VERSION);
-    // TODO: update when github repo
-    printf("https://github.com/chipkin/RP2040-BACnetServerExample\n");
     
     // Connect to wi-fi - loop until connected
+    printf("FYI: Attempting to connect to wifi %s\n", WIFI_SSID);
     while(cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000) != 0){
         printf("Attempting to connect to %s...\n", WIFI_SSID);
     }
-    printf("Connected!\n");
+    printf("FYI: Connected!\n");
 
     // Setup protocol control block
     upcb = udp_new();
     
     // Bind pcb to BACnet port
-    err_t err2 = udp_bind(upcb, IP_ADDR_ANY, APPLICATION_BACNET_UDP_PORT);
-    printf("Binded to UDP socket %d\n", APPLICATION_BACNET_UDP_PORT);
+    err_t udp_error = udp_bind(upcb, IP_ADDR_ANY, APPLICATION_BACNET_UDP_PORT);
+    if (udp_error != ERR_OK) {
+        printf("Failed to bind to UDP socket%d\n", APPLICATION_BACNET_UDP_PORT);
+        return 0;
+    }
+    printf("FYI: Binded to UDP socket %d\n", APPLICATION_BACNET_UDP_PORT);
 
     // Setup UDP receive message callback function
     udp_recv(upcb, receive_udp_callback, NULL);
@@ -170,7 +208,7 @@ int main() {
     // Setup temperature sensor
     adc_init();
     adc_set_temp_sensor_enabled(true);
-    adc_select_input(4); // 4 = internal cpu temp
+    adc_select_input(INTERNAL_TEMPERATURE_SENSOR_PIN); // 4 = internal cpu temp
 
 	// 2. Load the CAS BACnet stack functions
 	// ==================================================================================
@@ -183,6 +221,9 @@ int main() {
 
     // 3. Register callback functions
 	// ==================================================================================
+    // System
+    fpRegisterCallbackGetSystemTime(CallbackGetSystemTime);
+
     // Message 
     fpRegisterCallbackReceiveMessage(CallbackReceiveMessage);
     fpRegisterCallbackSendMessage(CallbackSendMessage);
@@ -192,10 +233,13 @@ int main() {
     fpRegisterCallbackGetPropertyUnsignedInteger(CallbackGetPropertyUInt);
     fpRegisterCallbackGetPropertyReal(CallbackGetPropertyReal);
     fpRegisterCallbackGetPropertyEnumerated(CallbackGetPropertyEnum);
+    fpRegisterCallbackGetPropertyOctetString(CallbackGetPropertyOctetString);
+    fpRegisterCallbackGetPropertyBool(CallbackGetPropertyBool);
 
     // Set property 
     fpRegisterCallbackSetPropertyUnsignedInteger(CallbackSetPropertyUInt);
     fpRegisterCallbackSetPropertyEnumerated(CallbackSetPropertyEnum);
+    fpRegisterCallbackSetPropertyOctetString(CallbackSetPropertyOctetString);
 
     // Remote device management
     fpRegisterCallbackReinitializeDevice(CallbackReinitializeDevice);
@@ -204,7 +248,7 @@ int main() {
     // ==================================================================================
     // Setup device object
     if (!fpAddDevice(APPLICATION_BACNET_DEVICE_INSTANCE)) {
-        printf("Error: Could not add device. Device instanse=%u\n", APPLICATION_BACNET_DEVICE_INSTANCE);
+        printf("Error: Could not add device. Device instance=%u\n", APPLICATION_BACNET_DEVICE_INSTANCE);
         return 0;
     }
     printf("FYI: BACnet device created: Device instance=%u\n", APPLICATION_BACNET_DEVICE_INSTANCE);
@@ -237,28 +281,21 @@ int main() {
     }
     printf("FYI: Enabled Read Property Multiple for Device %u\n", CASBACnetStackExampleConstants::SERVICE_READ_PROPERTY_MULTIPLE);
 
-    printf("Enabling SubscribeCOV... ");
+    printf("FYI: Enabling SubscribeCOV... ");
 	if (!fpSetServiceEnabled(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::SERVICE_SUBSCRIBE_COV, true)) {
 		printf("Failed to enable the SubscribeCOV service\n");
 		return false;
 	}
-	printf("OK");
-
-	printf("Enabling SubscribeCOVProperty... ");
-	if (!fpSetServiceEnabled(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::SERVICE_SUBSCRIBE_COV_PROPERTY, true)) {
-		printf("Failed to enable the SubscribeCOVProperty service\n");
-		return false;
-	}
-	printf("OK");
-
+	printf("OK\n");
 
     // Add objects
     // Analog Input
-    printf("Adding AnalogInput. analogInput.instance=[%d]...", APPLICATION_BACNET_OBJECT_ANALOG_INPUT_INSTANCE);
+    printf("FYI: Adding AnalogInput. analogInput.instance=[%d]... ", APPLICATION_BACNET_OBJECT_ANALOG_INPUT_INSTANCE);
 	if (!fpAddObject(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::OBJECT_TYPE_ANALOG_INPUT, APPLICATION_BACNET_OBJECT_ANALOG_INPUT_INSTANCE)) {
 		printf("Failed to add AnalogInput\n");
 		return 0;
 	}
+    printf("OK\n");
 
     fpSetPropertyWritable(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::OBJECT_TYPE_ANALOG_INPUT, APPLICATION_BACNET_OBJECT_ANALOG_INPUT_INSTANCE, CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_UNITS, true);
     fpSetPropertySubscribable(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::OBJECT_TYPE_ANALOG_INPUT, APPLICATION_BACNET_OBJECT_ANALOG_INPUT_INSTANCE, CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_PRESENT_VALUE, true);
@@ -273,20 +310,27 @@ int main() {
     fpSetPropertyEnabled(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::OBJECT_TYPE_MULTI_STATE_VALUE, APPLICATION_BACNET_OBJECT_MSV_LED_INSTANCE, CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_STATE_TEXT, true);
     
     // Network Port
+    printf("FYI: Adding NetworkPort. networkPort.instance=[%d]... ", APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE);
 	if (!fpAddNetworkPortObject(APPLICATION_BACNET_DEVICE_INSTANCE, APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE, CASBACnetStackExampleConstants::NETWORK_TYPE_IPV4, CASBACnetStackExampleConstants::PROTOCOL_LEVEL_BACNET_APPLICATION, CASBACnetStackExampleConstants::NETWORK_PORT_LOWEST_PROTOCOL_LAYER)) {
 		printf("Failed to add NetworkPort object\n");
 		return 0;
 	}
-    printf("Added NetworkPort. networkPort.instance=[%s]", APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE);
+    printf("OK\n", APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE);
+    fpSetPropertyWritable(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT, APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE, CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_BBMD_ADDRESS, true);
+    fpSetPropertyWritable(APPLICATION_BACNET_DEVICE_INSTANCE, CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT, APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE, CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_SUBSCRIPTION_LIFETIME, true);
+
+    // Print IP address, subnet mask, and broadcast IP address
+    if (!setup_network_port()) printf("Failed to setup network port object");
+
+    printf("FYI: NetworkPort.IPAddress: %d.%d.%d.%d\n", APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[0], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[1], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[2], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[3]);
+    printf("FYI: NetworkPort.IPSubnetMask: %d.%d.%d.%d\n", APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[0], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[1], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[2], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[3]);
+    printf("FYI: NetworkPort.BroadcastIPAddress: %d.%d.%d.%d\n", APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[0], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[1], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[2], APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[3]);
     
 
     // 5. Send I-Am of this device
 	// ==================================================================================
     uint8_t connectionString[6];
-    if (!get_broadcast_address(connectionString, 6)) {
-        printf("Error: Could not get the broadcast IP address\n");
-        return 0;
-    }
+    memcpy(connectionString, APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS, 4);
     connectionString[4] = APPLICATION_BACNET_UDP_PORT / 256;
     connectionString[5] = APPLICATION_BACNET_UDP_PORT % 256;
 
@@ -377,7 +421,7 @@ bool example_ntoa(uint8_t* addressBuffer, size_t maxBufferSize, unsigned long ip
 bool enqueue_udp_packet(struct udp_packet* packet)
 {
     // Packet queue is full
-    if (packet_queue_rear == PACKET_QUEUE_SIZE - 1)
+    if (packet_queue_rear == PACKET_QUEUE_MAXSIZE - 1)
     {
         return false;
     }
@@ -387,7 +431,16 @@ bool enqueue_udp_packet(struct udp_packet* packet)
     packet_queue_rear = packet_queue_rear + 1;
     packet_queue[packet_queue_rear] = *packet;
     return true;
-
+    /*
+    if (packet_queue_size == PACKET_QUEUE_MAXSIZE) {
+        return false;
+    }
+    packet_queue_rear = (packet_queue_rear + 1)
+                    % PACKET_QUEUE_MAXSIZE;
+    packet_queue[packet_queue_rear] = *packet;
+    packet_queue_size = packet_queue_size + 1;
+    return true;
+    */
 } 
 
 // Dequeue front of packet queue (if available)
@@ -408,7 +461,32 @@ bool get_udp_packet(struct udp_packet* packet)
         packet_queue_front = packet_queue_rear = -1;
     }
     return true;
+   /*
+    if (packet_queue_size == 0) return false;
+
+    *packet = packet_queue[packet_queue_front];
+    packet_queue_front = (packet_queue_front + 1)
+                   % PACKET_QUEUE_MAXSIZE;
+    packet_queue_size = packet_queue_size - 1;
+    return true;
+    */
 } 
+
+bool setup_network_port() {
+    if (
+        !example_ntoa(APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS, IPV4_ADDR_LENGTH, cyw43_state.netif[0].ip_addr.addr) ||
+        !example_ntoa(APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK, IPV4_ADDR_LENGTH, cyw43_state.netif[0].netmask.addr) ||
+        !example_ntoa(APPLICATION_BACNET_OBJECT_NETWORKPORT_GATEWAY, IPV4_ADDR_LENGTH, cyw43_state.netif[0].gw.addr)
+        ) return false;
+
+    memcpy(APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER[0], dns_getserver(0), IPV4_ADDR_LENGTH);
+    APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER_SIZE = 1;
+    APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[0] = APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[0] | ~APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[0];
+    APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[1] = APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[1] | ~APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[1];
+    APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[2] = APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[2] | ~APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[2];
+    APPLICATION_BACNET_OBJECT_NETWORKPORT_IPBROADCASTADDRESS[3] = APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS[3] | ~APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK[3];
+    return true;
+}
 
 // handle LED blinking
 bool blink_led(struct repeating_timer *t) {
@@ -469,12 +547,12 @@ uint16_t CallbackReceiveMessage(uint8_t* message, const uint16_t maxMessageLengt
     receivedConnectionString[3] = packet.src_addr[3];
     receivedConnectionString[4] = (packet.port >> 8) & 0xFF;
     receivedConnectionString[5] = packet.port;
-    memcpy(message, (uint8_t*)packet.payload ,packet.length);
+    memcpy(message, (uint8_t*)packet.payload, packet.length);
 
     *receivedConnectionStringLength = 6;
     *networkType = CASBACnetStackExampleConstants::NETWORK_TYPE_BACNET_IP;
 
-    printf("FYI: Recived message with %u bytes from %u.%u.%u.%u:%u\n", packet.length, receivedConnectionString[0], receivedConnectionString[1], receivedConnectionString[2], receivedConnectionString[3], packet.port);
+    printf("FYI: Received message with %u bytes from %u.%u.%u.%u:%u\n", packet.length, receivedConnectionString[0], receivedConnectionString[1], receivedConnectionString[2], receivedConnectionString[3], packet.port);
     return packet.length;
 }
 
@@ -612,7 +690,6 @@ bool CallbackGetPropertyCharString(const uint32_t deviceInstance, const uint16_t
         }
 		return false;
 	}
-
     return false;
 }
 
@@ -633,6 +710,44 @@ bool CallbackGetPropertyUInt(uint32_t deviceInstance, uint16_t objectType, uint3
         }
     }
 
+    // Network Port Object FdBbmdAddress Port
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_BBMD_ADDRESS) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			if (useArrayIndex && propertyArrayIndex == CASBACnetStackExampleConstants::FD_BBMD_ADDRESS_PORT) {
+				// Check for index 2, which is looking for the fdBbmdAddress port portion
+				*value = APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDPORT;
+				return true;
+			}
+		}
+	}
+	// Network Port Object FdSubscriptionLifetime
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_SUBSCRIPTION_LIFETIME) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			*value = APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDSUBSCRIPTIONLIFETIME;
+			return true;
+		}
+	}
+
+    // Example of Network Port Object BACnet IP UDP Port property
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_BACNET_IP_UDP_PORT) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			*value = APPLICATION_BACNET_UDP_PORT;
+			return true;
+		}
+	}
+    
+    // Example of Network Port Object IP DNS Server Array Size property
+	// Any properties that are an array must have an entry here for the array size.
+	// The array size is provided only if the useArrayIndex parameter is set to true and the propertyArrayIndex is zero.
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_IP_DNS_SERVER) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			if (useArrayIndex && propertyArrayIndex == 0) {
+				*value = (uint32_t)APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER_SIZE;
+				return true;
+			}
+		}
+	}
+
     return false;
 }
 
@@ -642,7 +757,8 @@ bool CallbackGetPropertyReal(uint32_t deviceInstance, uint16_t objectType, uint3
 	// Example of Analog Input / Value Object Present Value property
 	if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_PRESENT_VALUE) {
 		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_ANALOG_INPUT && objectInstance == APPLICATION_BACNET_OBJECT_ANALOG_INPUT_INSTANCE) {
-			uint16_t adc = adc_read();
+			// Conversion factor from https://github.com/DeimosHall/RP2040_CPU_Temperature
+            uint16_t adc = adc_read();
             float ADC_Voltage = float(adc) * CONVERSION_FACTOR;
             *value = 27 - (ADC_Voltage - 0.706) / 0.001721; 
             if (temperature_unit == CASBACnetStackExampleConstants::TEMPERATURE_ENUM_DEGREES_FAHRENHEIT) *value = *value * 9/5 + 32;
@@ -664,8 +780,81 @@ bool CallbackGetPropertyEnum(uint32_t deviceInstance, uint16_t objectType, uint3
 			return true;
 		}
 	}
-    
+
+        // Network Port Object - FdBbmdAddress Host Type
+    else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_BBMD_ADDRESS) {
+        if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+            *value = APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDHOSTTYPE;
+            return true;
+        }
+    }
 	// We could not answer this request. 
+	return false;
+}
+
+// Callback used by the BACnet Stack to get Boolean property values from the user
+bool CallbackGetPropertyBool(uint32_t deviceInstance, uint16_t objectType, uint32_t objectInstance, uint32_t propertyIdentifier, bool* value, bool useArrayIndex, uint32_t propertyArrayIndex)
+{
+	// Network Port Object - Changes Pending property
+	if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_CHANGES_PENDING) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			*value = APPLICATION_BACNET_OBJECT_NETWORKPORT_CHANGESPENDING;
+			return true;
+		}
+	}
+	return false;
+}
+
+// Callback used by the BACnet Stack to get OctetString property values from the user
+bool CallbackGetPropertyOctetString(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, uint8_t* value, uint32_t* valueElementCount, const uint32_t maxElementCount, const bool useArrayIndex, const uint32_t propertyArrayIndex)
+{
+	// Example of Network Port Object IP Address property
+	if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_IP_ADDRESS) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			memcpy(value, APPLICATION_BACNET_OBJECT_NETWORKPORT_IPADDRESS, IPV4_ADDR_LENGTH);
+			*valueElementCount = IPV4_ADDR_LENGTH;
+			return true;
+		}
+	}
+	// Example of Network Port Object IP Default Gateway property
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_IP_DEFAULT_GATEWAY) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			memcpy(value, APPLICATION_BACNET_OBJECT_NETWORKPORT_GATEWAY, IPV4_ADDR_LENGTH);
+			*valueElementCount = IPV4_ADDR_LENGTH;
+			return true;
+		}
+	}
+	// Example of Network Port Object IP Subnet Mask property
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_IP_SUBNET_MASK) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			memcpy(value, APPLICATION_BACNET_OBJECT_NETWORKPORT_IPSUBNETMASK, IPV4_ADDR_LENGTH);
+			*valueElementCount = IPV4_ADDR_LENGTH;
+			return true;
+		}
+	}
+
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_IP_DNS_SERVER) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			// The IP DNS Server property is an array of DNS Server addresses
+			if (useArrayIndex) {
+				if (propertyArrayIndex != 0 && propertyArrayIndex <= APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER_SIZE) {
+					memcpy(value, APPLICATION_BACNET_OBJECT_NETWORKPORT_DNSSERVER[propertyArrayIndex - 1], IPV4_ADDR_LENGTH);
+					*valueElementCount = IPV4_ADDR_LENGTH;
+					return true;
+				}
+			}
+		}
+	}
+	// Network Port Object FdBbmdAddress Host (as IP Address)
+	else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_BBMD_ADDRESS) {
+		if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+			if (useArrayIndex && propertyArrayIndex == CASBACnetStackExampleConstants::HOST_TYPE_IPADDRESS) {
+				memcpy(value, APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDHOSTIP, IPV4_ADDR_LENGTH);
+				*valueElementCount = IPV4_ADDR_LENGTH;
+				return true;
+			}
+		}
+	}
 	return false;
 }
 
@@ -693,6 +882,14 @@ bool CallbackSetPropertyUInt(const uint32_t deviceInstance, const uint16_t objec
         }
     }
 
+    // Network Port Object FdSubscriptionLifetime
+    else if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_SUBSCRIPTION_LIFETIME) {
+        if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+            APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDSUBSCRIPTIONLIFETIME = value;
+            APPLICATION_BACNET_OBJECT_NETWORKPORT_CHANGESPENDING = true;
+            return true;
+        }
+    }
     return false;
 }
 
@@ -715,13 +912,40 @@ bool CallbackSetPropertyEnum(const uint32_t deviceInstance, const uint16_t objec
                 }
 			}
 		}
-	}
+    }
 	return false;
 }
 
+// Callback used by the BACnet Stack to set Enumerated property values to the user
+bool CallbackSetPropertyOctetString(const uint32_t deviceInstance, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, const uint8_t* value, const uint32_t length, const bool useArrayIndex, const uint32_t propertyArrayIndex, const uint8_t priority, uint32_t* errorCode)
+{
+    // Example of setting FdBbmdAddress Host IP
+    if (propertyIdentifier == CASBACnetStackExampleConstants::PROPERTY_IDENTIFIER_FD_BBMD_ADDRESS) {
+        if (objectType == CASBACnetStackExampleConstants::OBJECT_TYPE_NETWORK_PORT && objectInstance == APPLICATION_BACNET_OBJECT_NETWORKPORT_INSTANCE) {
+            if (useArrayIndex && propertyArrayIndex == CASBACnetStackExampleConstants::FD_BBMD_ADDRESS_HOST) {
+                if (length > 4) {
+                    *errorCode = CASBACnetStackExampleConstants::ERROR_VALUE_OUT_OF_RANGE;
+                    return false;
+                }
+                if (memcmp(APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDHOSTIP, value, length) == 0) {
+                    // No change, return true
+                    return true;
+                }
+                else {
+                    // Store new value and set changes pending to true
+                    memcpy(APPLICATION_BACNET_OBJECT_NETWORKPORT_FDBBMDHOSTIP, value, length);
+                    APPLICATION_BACNET_OBJECT_NETWORKPORT_CHANGESPENDING = true;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+
 // Other Callbacks
 // ==============================================================================
-
 bool CallbackReinitializeDevice(const uint32_t deviceInstance, const uint32_t reinitializedState, const char* password, const uint32_t passwordLength, uint32_t* errorCode) {
 	// This callback is called when this BACnet Server device receives a ReinitializeDevice message
 	// In this callback, you will handle the reinitializedState.
@@ -758,12 +982,12 @@ bool CallbackReinitializeDevice(const uint32_t deviceInstance, const uint32_t re
 	//								 If WARM_START, prepare device for reboot, return true. and reboot.  
 	// NOTE: Must return true first before rebooting so the stack sends the SimpleAck.
 	if (reinitializedState == CASBACnetStackExampleConstants::REINITIALIZED_STATE_ACTIVATE_CHANGES) {
-		//g_database.networkPort.ChangesPending = false;
+		APPLICATION_BACNET_OBJECT_NETWORKPORT_CHANGESPENDING = false;
 		return true;
 	}
 	else if (reinitializedState == CASBACnetStackExampleConstants::REINITIALIZED_STATE_WARM_START) {
 		// Flag for reboot and handle reboot after stack responds with SimpleAck.
-		//g_database.networkPort.ChangesPending = false;
+		APPLICATION_BACNET_OBJECT_NETWORKPORT_CHANGESPENDING = false;
 		return true;
 	}
 	else {
@@ -772,9 +996,9 @@ bool CallbackReinitializeDevice(const uint32_t deviceInstance, const uint32_t re
 		return false;
 	}
 }
-/*
+
 time_t CallbackGetSystemTime()
 {
-    return millis() / 1000;
+    return get_absolute_time();
 }
-*/
+

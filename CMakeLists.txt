@@ -1,31 +1,14 @@
+# CMake file for building the Bacnet Server
+# Created by: Justin Chang
+# Last updated: 10/3/2023
+
 cmake_minimum_required(VERSION 3.13)
 
 set(PROJECT_NAME "BACnetServerExamplePico")
 
 set(PICO_BOARD pico_w)
 
-
-set(LIB_STACK "CASBACnetStack_x64_Release")
-set(LIB_PATH "bin/CASBACnetStack_x64_Release.a")
-
-SET (CC "g++")
-
-#set(CFLAGS "-m64 -Wall")
-set(CFLAGS "-Wall")
-
-set(DEBUGFLAGS "-O0 -g3 -DCAS_BACNET_STACK_LIB_TYPE_LIB")
-set(RELEASEFLAGS "-DCAS_BACNET_STACK_LIB_TYPE_LIB")
-#set(OBJECTFLAGS "-c -fmessage-length=0 -fPIC -MMD -MP")
-#set(OBJECTFLAGS "-c -fPIC -MMD -MP")
-set(LDFLAGS "-static")
-
-#add_compile_options(${RELEASEFLAGS} ${CFLAGS} ${OBJECTFLAGS} ${INCLUDES})
-#add_compile_options(-Wall -DCAS_BACNET_STACK_LIB_TYPE_LIB -fexceptions)
-#SET(CMAKE_CXX_FLAGS "-Wall -DCAS_BACNET_STACK_LIB_TYPE_LIB -fmessage-length=0 -fPIC -MMD -MP -fexceptions" )
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
-#target_compile_definitions(${PROJECT_NAME}
-#    PUBLIC O3 CAS_BACNET_STACK_LIB_TYPE_LIB
-#)
 
 set(SOURCES 
     "submodules/cas-bacnet-stack/source/*.cpp"
@@ -58,13 +41,8 @@ include_directories(
 
 # include files
 file(GLOB SRC_FILES
-    #"submodules/cas-bacnet-stack/source/*.cpp"
-    #"submodules/cas-bacnet-stack/source/*.h"
     ${SOURCES}
 )
-
-# build the chipkin bacnet stack
-#add_library(${STACK_LIBRARY} STATIC ${LIB_SRC_FILES})
 
 # rest of your project
 add_executable(${PROJECT_NAME}
