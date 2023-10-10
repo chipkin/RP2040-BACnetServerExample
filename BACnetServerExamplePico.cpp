@@ -43,8 +43,8 @@ const char* APPLICATION_VERSION = "0.0.1";  // See CHANGELOG.md for a full list 
 // Application Settings
 // =======================================
 // Wifi credentials
-const char WIFI_SSID[] = "2401 Tangent";
-const char WIFI_PASSWORD[] = "Installation05";
+const char WIFI_SSID[] = "TODO_WIFI_SSID";
+const char WIFI_PASSWORD[] = "TODO_WIFI_PASSWORD";
 
 // Device Settings
 const uint32_t APPLICATION_BACNET_DEVICE_INSTANCE = 389007;
