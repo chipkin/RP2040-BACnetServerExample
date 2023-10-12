@@ -5,14 +5,14 @@ In this project we are using the [CAS BACnet stack](https://www.bacnetstack.com/
 
 A BACnet client (such as the [CAS BACnet Explorer](https://store.chipkin.com/products/tools/cas-bacnet-explorer)) can be used to write to this MSV to change the mode.
 
-The MSV allows for three possaible values to be written.
+The MSV allows for three possible values to be written.
 
 - 1 = **Off**
 - 2 = **On**
 - 3 = **Blink** - Blinks the LED on and off at a rate of 1000 ms.
 - 4 = **Blink** - Blinks the LED on and off at a rate of 250  ms.
 
-The Analog Input allows for three possaible values to be written to the units.
+The Analog Input allows for three possible values to be written to the units.
 
 - 1 = **Celsius** - 62
 - 2 = **Fahrenheit** - 64
